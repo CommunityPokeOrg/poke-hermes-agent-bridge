@@ -121,6 +121,21 @@ async def test_stop_terminal_409(client: httpx.AsyncClient) -> None:
     assert r.status_code == 409
 
 
+async def test_run_receives_string_input_and_instructions(
+    client: httpx.AsyncClient,
+    mock_app,  # type: ignore[no-untyped-def]
+) -> None:
+    r = await client.post(
+        "/v1/tasks",
+        json={"prompt": "do X", "instructions": "be terse", "mode": "async"},
+        headers=AUTH,
+    )
+    assert r.status_code == 202
+    rec = mock_app.state.mock.received_runs[-1]
+    assert rec["input"] == "do X"
+    assert rec["instructions"] == "be terse"
+
+
 async def test_failed_run(client: httpx.AsyncClient) -> None:
     r = await client.post(
         "/v1/tasks", json={"prompt": "[fail] boom", "mode": "async"}, headers=AUTH

@@ -97,6 +97,7 @@ class MockState:
     def __init__(self) -> None:
         self.runs: dict[str, MockRun] = {}
         self.received_session_keys: list[str | None] = []
+        self.received_runs: list[dict[str, Any]] = []
 
 
 def create_mock_app(api_key: str = "mock-key-0123456789ab", run_submission: bool = True) -> FastAPI:
@@ -199,6 +200,9 @@ def create_mock_app(api_key: str = "mock-key-0123456789ab", run_submission: bool
         if auth != f"Bearer {api_key}":
             return _openai_error("invalid api key", "invalid_api_key", 401)
         body = await request.json()
+        app.state.mock.received_runs.append(
+            {"input": body.get("input"), "instructions": body.get("instructions")}
+        )
         prompt = _extract_prompt(body)
         run = MockRun(f"run_{secrets.token_hex(8)}", prompt)
         run.status = "running"

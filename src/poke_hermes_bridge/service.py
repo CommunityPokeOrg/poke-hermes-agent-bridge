@@ -220,7 +220,7 @@ class BridgeService:
     async def _run_via_runs(self, task: Task, spec: TaskCreate, caller: str) -> None:
         try:
             resp = await self.hermes.create_run(
-                input=self._messages(spec),
+                input=spec.prompt,
                 instructions=spec.instructions,
                 session_key=session_key_for(caller, spec.conversation_id),
                 model=self.settings.hermes_model,
@@ -233,7 +233,16 @@ class BridgeService:
         task.status = "running"
         await self.store.update(task)
         await self.store.append_event(task.id, "task.status", {"status": "running"})
-        asyncio.create_task(self._follow_run(task, spec))
+        self._spawn(self._follow_run_guarded(task, spec))
+
+    async def _follow_run_guarded(self, task: Task, spec: TaskCreate) -> None:
+        try:
+            await self._follow_run(task, spec)
+        except Exception as exc:  # noqa: BLE001 - never strand a task in running
+            logger.exception("run follower for task %s crashed", task.id)
+            if task.status not in TERMINAL_STATUSES:
+                await self._fail(task, f"internal error: {type(exc).__name__}")
+            await self._maybe_callback(task, spec)
 
     async def _run_via_chat(self, task: Task, spec: TaskCreate, caller: str) -> None:
         task.status = "running"
@@ -260,7 +269,7 @@ class BridgeService:
         await self._maybe_callback(task, spec)
 
     async def _follow_run(self, task: Task, spec: TaskCreate) -> None:
-        if task.hermes_run_id is None:
+        if task.hermes_run_id is None or task.status in TERMINAL_STATUSES:
             return
         run_id = task.hermes_run_id
         poll_interval = self.settings.bridge_poll_interval_seconds
@@ -276,7 +285,7 @@ class BridgeService:
             finally:
                 stream_done.set()
 
-        async def poll() -> None:
+        async def poll(consumer: asyncio.Task[None]) -> None:
             while not stream_done.is_set():
                 await asyncio.sleep(poll_interval)
                 if stream_done.is_set():
@@ -285,12 +294,24 @@ class BridgeService:
                     run = await self.hermes.get_run(run_id)
                 except HermesError:
                     continue
+                except Exception:
+                    # surface via the post-close poll loop, which is covered by
+                    # the guarded wrapper
+                    stream_done.set()
+                    return
+                if run.get("status") in TERMINAL_STATUSES:
+                    # let the SSE consumer drain its buffered events first so
+                    # task.completed is ordered after the hermes.* events
+                    try:
+                        await asyncio.wait_for(asyncio.shield(consumer), timeout=2.0)
+                    except (TimeoutError, HermesError):
+                        pass
                 await self._apply_run_status(task, run)
                 if task.status in TERMINAL_STATUSES:
                     return
 
         consumer = asyncio.create_task(consume())
-        poller = asyncio.create_task(poll())
+        poller = asyncio.create_task(poll(consumer))
         # Wait for the stream to close, then poll until terminal.
         await stream_done.wait()
         poller.cancel()

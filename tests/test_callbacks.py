@@ -76,7 +76,8 @@ async def test_poke_callback_retries_and_delivers() -> None:
         for _ in range(100):
             await asyncio.sleep(0.05)
             t = (await client.get(f"/v1/tasks/{task_id}", headers=AUTH)).json()
-            if t["callback"]["delivered"] is not None:
+            cb = t["callback"]
+            if cb["delivered"] is True or cb["attempts"] >= 3:
                 break
         assert t["status"] == "completed"
         assert t["callback"]["delivered"] is True
@@ -131,7 +132,8 @@ async def test_webhook_callback_signature() -> None:
         for _ in range(100):
             await asyncio.sleep(0.05)
             t = (await client.get(f"/v1/tasks/{task_id}", headers=AUTH)).json()
-            if t["callback"]["delivered"] is not None:
+            cb = t["callback"]
+            if cb["delivered"] is True or cb["attempts"] >= 3:
                 break
         assert t["callback"]["delivered"] is True
     assert calls
@@ -142,6 +144,44 @@ async def test_webhook_callback_signature() -> None:
     ).hexdigest()
     assert call["sig"] == f"sha256={expected}"
     assert json.loads(call["body"])["id"] == task_id
+
+
+async def test_follower_crash_fails_task_and_fires_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+    settings = make_settings(POKE_API_KEY="poke-key-xyz")
+    hermes = make_hermes()
+
+    async def boom(run_id: str) -> dict:
+        raise RuntimeError("poll exploded")
+
+    monkeypatch.setattr(hermes, "get_run", boom)
+    dispatcher = CallbackDispatcher(
+        settings, http=httpx.AsyncClient(transport=ASGITransport(app=fake_poke_app(calls)))
+    )
+    service = BridgeService(settings, hermes, callbacks=dispatcher)
+    app = create_app(settings, hermes=hermes, service=service)
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://bridge"
+    ) as client:
+        r = await client.post(
+            "/v1/tasks",
+            json={"prompt": "hi", "mode": "async", "callback": {"type": "poke"}},
+            headers=AUTH,
+        )
+        task_id = r.json()["id"]
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            t = (await client.get(f"/v1/tasks/{task_id}", headers=AUTH)).json()
+            cb = t["callback"]
+            # delivered flips False mid-retry; wait for a definitive outcome
+            if cb["delivered"] is True or cb["attempts"] >= 3:
+                break
+        assert t["status"] == "failed"
+        assert "internal error: RuntimeError" in t["error"]
+        assert t["callback"]["delivered"] is True
+    assert calls[-1]["body"]["status"] == "failed"
 
 
 async def test_ssrf_guard_blocks_loopback() -> None:
