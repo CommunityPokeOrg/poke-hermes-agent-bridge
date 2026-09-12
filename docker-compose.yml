@@ -1,0 +1,16 @@
+services:
+  bridge:
+    build: .
+    ports:
+      - "8700:8700"
+    env_file: .env
+    environment:
+      HERMES_BASE_URL: ${HERMES_BASE_URL:-http://127.0.0.1:8642}
+    restart: unless-stopped
+
+  mock-hermes:
+    profiles: ["dev"]
+    build: .
+    entrypoint: ["poke-hermes-bridge", "mock-hermes", "--host", "0.0.0.0", "--port", "8642", "--api-key", "mock-key-0123456789ab"]
+    ports:
+      - "8642:8642"
