@@ -20,6 +20,16 @@ async def wait_task(client: httpx.AsyncClient, task_id: str, timeout: float = 5.
     raise AssertionError(f"task {task_id} did not finish")
 
 
+async def wait_running(client: httpx.AsyncClient, task_id: str, timeout: float = 5.0) -> dict:
+    """Wait until an async task has a live Hermes run (status running)."""
+    for _ in range(int(timeout / 0.05)):
+        task = (await client.get(f"/v1/tasks/{task_id}", headers=AUTH)).json()
+        if task["hermes_run_id"] or task["status"] in ("completed", "failed", "cancelled"):
+            return task
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"task {task_id} never got a hermes run")
+
+
 async def test_async_lifecycle_and_events(client: httpx.AsyncClient) -> None:
     r = await client.post(
         "/v1/tasks",
@@ -92,7 +102,7 @@ async def test_stop(client: httpx.AsyncClient) -> None:
         "/v1/tasks", json={"prompt": "[slow] work", "mode": "async"}, headers=AUTH
     )
     task_id = r.json()["id"]
-    await asyncio.sleep(0.2)
+    await wait_running(client, task_id)
     r = await client.post(f"/v1/tasks/{task_id}/stop", headers=AUTH)
     assert r.status_code == 200
     task = await wait_task(client, task_id)
@@ -104,7 +114,7 @@ async def test_steer_accepted_then_409_on_terminal(client: httpx.AsyncClient) ->
         "/v1/tasks", json={"prompt": "[slow] work", "mode": "async"}, headers=AUTH
     )
     task_id = r.json()["id"]
-    await asyncio.sleep(0.2)
+    await wait_running(client, task_id)
     r = await client.post(f"/v1/tasks/{task_id}/steer", json={"input": "go faster"}, headers=AUTH)
     assert r.status_code == 200
     await wait_task(client, task_id)
@@ -131,6 +141,10 @@ async def test_run_receives_string_input_and_instructions(
         headers=AUTH,
     )
     assert r.status_code == 202
+    for _ in range(100):
+        if mock_app.state.mock.received_runs:
+            break
+        await asyncio.sleep(0.05)
     rec = mock_app.state.mock.received_runs[-1]
     assert rec["input"] == "do X"
     assert rec["instructions"] == "be terse"

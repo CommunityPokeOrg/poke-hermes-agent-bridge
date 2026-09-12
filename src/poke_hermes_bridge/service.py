@@ -54,20 +54,21 @@ class BridgeService:
             max_events_per_task=settings.bridge_max_events_per_task,
         )
         self.callbacks = callbacks or CallbackDispatcher(settings)
-        self._caps_cache: tuple[float, dict[str, Any] | None] = (0.0, None)
+        self._caps: dict[str, Any] | None = None
+        self._caps_fresh_until = 0.0
         self._background: set[asyncio.Task[Any]] = set()
 
     # -- Hermes capabilities (lazy, 60s cache) ------------------------------
 
     async def hermes_capabilities(self) -> dict[str, Any] | None:
-        cached_at, cached = self._caps_cache
-        if time.monotonic() - cached_at < CAPABILITIES_CACHE_TTL:
-            return cached
+        if time.monotonic() < self._caps_fresh_until:
+            return self._caps
         try:
-            caps = await self.hermes.capabilities()
+            caps: dict[str, Any] | None = await self.hermes.capabilities()
         except HermesError:
             caps = None
-        self._caps_cache = (time.monotonic(), caps)
+        self._caps = caps
+        self._caps_fresh_until = time.monotonic() + CAPABILITIES_CACHE_TTL
         return caps
 
     # -- task submission -----------------------------------------------------
